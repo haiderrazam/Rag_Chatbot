@@ -2,7 +2,6 @@
 import os
 import tempfile
 import streamlit as st
-from dotenv import load_dotenv
 # import langchain
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -14,7 +13,6 @@ from langchain_chroma import Chroma #chromaDB vector store where vectors/embeddi
 
 
 # setup: env + streamlit page
-load_dotenv()
 st.set_page_config(page_title="RAG Q&A", layout="wide")
 st.title("RAG Q&A with Multiple PDFs + Chat History")
 
@@ -27,21 +25,27 @@ with st.sidebar:
 
 
 # API key guard
-api_key = api_key_input or os.getenv("GROQ_API_KEY")
+api_key = api_key_input or st.secrets.get("GROQ_API_KEY")
 if not api_key:
     st.warning("Please enter your Groq API key (or set it in the .env file)")
     st.stop()
 
 
 # embeddings and llm initialization
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2",
-    encode_kwargs={"normalize_embeddings": True},
-)
-llm = ChatGroq(
-    groq_api_key=api_key,
-    model_name="llama-3.3-70b-versatile"
-)
+@st.cache_resource
+def load_embeddings():
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        encode_kwargs={"normalize_embeddings": True},
+    )
+embeddings = load_embeddings()
+@st.cache_resource
+def load_llm(api_key):
+    return ChatGroq(
+        groq_api_key=api_key,
+        model_name="llama-3.3-70b-versatile"
+    )
+llm = load_llm(api_key)
 
 
 # file uploader
@@ -54,57 +58,61 @@ if not uploaded_files:
     st.info("Please upload one or more PDFs to begin.")
     st.stop()
 
-all_docs = []
-tmp_paths = []
-for pdf in uploaded_files:
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    tmp.write(pdf.getvalue())
-    tmp.close()
-    tmp_paths.append(tmp.name)
 
-    loader = PyPDFLoader(tmp.name)
-    docs = loader.load()
-
-    for d in docs:
-        d.metadata["source_file"] = pdf.name
-    
-    all_docs.extend(docs)
-
-st.success(f"Loaded {len(all_docs)} documents from {len(uploaded_files)} PDFs.")
-
-
-# clean up temp files
-for p in tmp_paths:
-    try:
-        os.unlink(p)
-    except Exception:
-        pass
-
-
-# chunking (split text)
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1200,
-    chunk_overlap=120
-)
-splits = text_splitter.split_documents(all_docs)
-
-# Vectorstore 
 INDEX_DIR = "chroma_index"
+if uploaded_files and "vectorstore" not in st.session_state:
+    all_docs = []
+    tmp_paths = []
+    for pdf in uploaded_files:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        tmp.write(pdf.getvalue())
+        tmp.close()
+        tmp_paths.append(tmp.name)
+
+        loader = PyPDFLoader(tmp.name)
+        docs = loader.load()
+
+        for d in docs:
+            d.metadata["source_file"] = pdf.name
+        
+        all_docs.extend(docs)
+
+    st.success(f"Loaded {len(all_docs)} documents from {len(uploaded_files)} PDFs.")
+
+    # chunking (split text)
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1200,
+        chunk_overlap=120
+    )
+    splits = text_splitter.split_documents(all_docs)
+    
+    # Vectorstore
+    vectorstore = Chroma.from_documents(
+        splits,
+        embeddings,
+        persist_directory=INDEX_DIR
+    )
+
+    # Save to session
+    st.session_state.vectorstore = vectorstore
+    st.sidebar.write(f"🔍 Indexed {len(splits)} chunks for retrieval")
+
+    # clean up temp files
+    for p in tmp_paths:
+        try:
+            os.unlink(p)
+        except Exception:
+            pass
+
+    # Retrieve stored vector DB
+    vectorstore = st.session_state.vectorstore
+
+    retriever = vectorstore.as_retriever(
+        search_type="mmr",
+        search_kwargs={"k": 5, "fetch_k": 20}
+    )
 
 
-
-vectorstore = Chroma.from_documents(
-    splits,
-    embeddings,
-    persist_directory=INDEX_DIR
-)
-
-retriever = vectorstore.as_retriever(
-    search_type="mmr",
-    search_kwargs={"k": 5, "fetch_k": 20}
-)
-
-st.sidebar.write(f"🔍 Indexed {len(splits)} chunks for retrieval")
 
 # Helper: format docs for stuffing
 def _join_docs(docs, max_chars=7000):
