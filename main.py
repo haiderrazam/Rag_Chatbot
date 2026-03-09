@@ -104,13 +104,14 @@ if uploaded_files and "vectorstore" not in st.session_state:
         except Exception:
             pass
 
-    # Retrieve stored vector DB
-    vectorstore = st.session_state.vectorstore
 
-    retriever = vectorstore.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": 5, "fetch_k": 20}
-    )
+# Retrieve stored vector DB
+vectorstore = st.session_state.vectorstore
+
+retriever = vectorstore.as_retriever(
+    search_type="mmr",
+    search_kwargs={"k": 5, "fetch_k": 20}
+)
 
 
 
@@ -157,6 +158,14 @@ def get_history(session_id: str):
 
 # chat ui
 session_id = st.text_input(" 🆔 Session ID ", value="default_session")
+
+# chat history
+history = get_history(session_id)
+for msg in history.messages:
+    role = "assistant" if msg.type == "ai" else "user"
+    st.chat_message(role).write(msg.content)
+
+# user input
 user_q = st.chat_input("💬 Ask a question...")
 
 
@@ -176,7 +185,7 @@ if user_q:
     docs = retriever.invoke(standalone_q)
 
     if not docs:
-        answer = "Out of scope — not found in provided documents."
+        answer = "Out of scope - not found in provided documents."
         st.chat_message("user").write(user_q)
         st.chat_message("assistant").write(answer)
         history.add_user_message(user_q)
